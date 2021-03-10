@@ -36,15 +36,16 @@ impl<DB: Database> QueryData<DB> {
 #[cfg(feature = "offline")]
 pub mod offline {
     use super::QueryData;
-    use std::fs::File;
+    use crate::database::DatabaseExt;
 
     use std::fmt::{self, Formatter};
+    use std::fs::File;
+    use std::io::{BufReader, BufWriter};
+    use std::path::Path;
 
-    use crate::database::DatabaseExt;
     use proc_macro2::Span;
     use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
     use sqlx_core::describe::Describe;
-    use std::path::Path;
 
     #[derive(serde::Deserialize)]
     pub struct DynQueryData {
@@ -60,11 +61,11 @@ pub mod offline {
         /// Find and deserialize the data table for this query from a shared `sqlx-data.json`
         /// file. The expected structure is a JSON map keyed by the SHA-256 hash of queries in hex.
         pub fn from_data_file(path: impl AsRef<Path>, query: &str) -> crate::Result<Self> {
-            serde_json::Deserializer::from_reader(
+            serde_json::Deserializer::from_reader(BufReader::new(
                 File::open(path.as_ref()).map_err(|e| {
                     format!("failed to open path {}: {}", path.as_ref().display(), e)
                 })?,
-            )
+            ))
             .deserialize_map(DataFileVisitor {
                 query,
                 hash: hash_string(query),
@@ -107,8 +108,10 @@ pub mod offline {
             ));
 
             serde_json::to_writer_pretty(
-                File::create(&path)
-                    .map_err(|e| format!("failed to open path {}: {}", path.display(), e))?,
+                BufWriter::new(
+                    File::create(&path)
+                        .map_err(|e| format!("failed to open path {}: {}", path.display(), e))?,
+                ),
                 self,
             )
             .map_err(Into::into)

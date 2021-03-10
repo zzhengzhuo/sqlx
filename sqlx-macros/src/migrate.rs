@@ -10,10 +10,10 @@ pub struct QuotedMigrationType(MigrationType);
 impl ToTokens for QuotedMigrationType {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let ts = match self.0 {
-            MigrationType::Simple => quote! { sqlx::migrate::MigrationType::Simple },
-            MigrationType::ReversibleUp => quote! { sqlx::migrate::MigrationType::ReversibleUp },
+            MigrationType::Simple => quote! { ::sqlx::migrate::MigrationType::Simple },
+            MigrationType::ReversibleUp => quote! { ::sqlx::migrate::MigrationType::ReversibleUp },
             MigrationType::ReversibleDown => {
-                quote! { sqlx::migrate::MigrationType::ReversibleDown }
+                quote! { ::sqlx::migrate::MigrationType::ReversibleDown }
             }
         };
         tokens.append_all(ts.into_iter());
@@ -39,12 +39,12 @@ impl ToTokens for QuotedMigration {
         } = &self;
 
         let ts = quote! {
-            sqlx::migrate::Migration {
+            ::sqlx::migrate::Migration {
                 version: #version,
-                description: std::borrow::Cow::Borrowed(#description),
+                description: ::std::borrow::Cow::Borrowed(#description),
                 migration_type:  #migration_type,
-                sql: std::borrow::Cow::Borrowed(#sql),
-                checksum: std::borrow::Cow::Borrowed(&[
+                sql: ::std::borrow::Cow::Borrowed(#sql),
+                checksum: ::std::borrow::Cow::Borrowed(&[
                     #(#checksum),*
                 ]),
             }
@@ -55,13 +55,13 @@ impl ToTokens for QuotedMigration {
 }
 
 // mostly copied from sqlx-core/src/migrate/source.rs
-pub(crate) fn expand_migrator_from_dir(dir: LitStr) -> crate::Result<proc_macro2::TokenStream> {
+pub(crate) fn expand_migrator_from_dir(dir: LitStr) -> crate::Result<TokenStream> {
     let path = crate::common::resolve_path(&dir.value(), dir.span())?;
     let mut migrations = Vec::new();
 
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        if !entry.metadata()?.is_file() {
+        if !fs::metadata(entry.path())?.is_file() {
             // not a file; ignore
             continue;
         }
@@ -102,8 +102,8 @@ pub(crate) fn expand_migrator_from_dir(dir: LitStr) -> crate::Result<proc_macro2
     migrations.sort_by_key(|m| m.version);
 
     Ok(quote! {
-        sqlx::migrate::Migrator {
-            migrations: std::borrow::Cow::Borrowed(&[
+        ::sqlx::migrate::Migrator {
+            migrations: ::std::borrow::Cow::Borrowed(&[
                 #(#migrations),*
             ])
         }

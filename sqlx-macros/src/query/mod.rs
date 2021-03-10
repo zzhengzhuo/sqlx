@@ -1,7 +1,9 @@
 use std::env;
-use std::{borrow::Cow, path::PathBuf};
+use std::path::Path;
+#[cfg(feature = "offline")]
+use std::path::PathBuf;
 
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::TokenStream;
 use syn::Type;
 use url::Url;
 
@@ -16,7 +18,6 @@ use crate::database::DatabaseExt;
 use crate::query::data::QueryData;
 use crate::query::input::RecordType;
 use either::Either;
-use lazy_static::lazy_static;
 
 mod args;
 mod data;
@@ -25,19 +26,31 @@ mod output;
 
 // If we are in a workspace, lookup `workspace_root` since `CARGO_MANIFEST_DIR` won't
 // reflect the workspace dir: https://github.com/rust-lang/cargo/issues/3946
-lazy_static! {
-    static ref CRATE_ROOT: PathBuf = {
-        let manifest_dir =
-            env::var("CARGO_MANIFEST_DIR").expect("`CARGO_MANIFEST_DIR` must be set");
+#[cfg(feature = "offline")]
+static CRATE_ROOT: once_cell::sync::Lazy<PathBuf> = once_cell::sync::Lazy::new(|| {
+    use serde::Deserialize;
+    use std::process::Command;
 
-        let metadata = cargo_metadata::MetadataCommand::new()
-            .current_dir(manifest_dir)
-            .exec()
-            .expect("Could not fetch metadata");
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("`CARGO_MANIFEST_DIR` must be set");
 
-        metadata.workspace_root
-    };
-}
+    let cargo = env::var_os("CARGO").expect("`CARGO` must be set");
+
+    let output = Command::new(&cargo)
+        .args(&["metadata", "--format-version=1"])
+        .current_dir(manifest_dir)
+        .output()
+        .expect("Could not fetch metadata");
+
+    #[derive(Deserialize)]
+    struct Metadata {
+        workspace_root: PathBuf,
+    }
+
+    let metadata: Metadata =
+        serde_json::from_slice(&output.stdout).expect("Invalid `cargo metadata` output");
+
+    metadata.workspace_root
+});
 
 pub fn expand_input(input: QueryMacroInput) -> crate::Result<TokenStream> {
     let manifest_dir =
@@ -45,7 +58,7 @@ pub fn expand_input(input: QueryMacroInput) -> crate::Result<TokenStream> {
 
     // If a .env file exists at CARGO_MANIFEST_DIR, load environment variables from this,
     // otherwise fallback to default dotenv behaviour.
-    let env_path = std::path::Path::new(&manifest_dir).join(".env");
+    let env_path = Path::new(&manifest_dir).join(".env");
     if env_path.exists() {
         dotenv::from_path(&env_path)
             .map_err(|e| format!("failed to load environment from {:?}, {}", env_path, e))?
@@ -62,7 +75,7 @@ pub fn expand_input(input: QueryMacroInput) -> crate::Result<TokenStream> {
 
         #[cfg(feature = "offline")]
         _ => {
-            let data_file_path = std::path::Path::new(&manifest_dir).join("sqlx-data.json");
+            let data_file_path = Path::new(&manifest_dir).join("sqlx-data.json");
 
             let workspace_data_file_path = CRATE_ROOT.join("sqlx-data.json");
 
@@ -153,10 +166,7 @@ fn expand_from_db(input: QueryMacroInput, db_url: &str) -> crate::Result<TokenSt
 }
 
 #[cfg(feature = "offline")]
-pub fn expand_from_file(
-    input: QueryMacroInput,
-    file: std::path::PathBuf,
-) -> crate::Result<TokenStream> {
+pub fn expand_from_file(input: QueryMacroInput, file: PathBuf) -> crate::Result<TokenStream> {
     use data::offline::DynQueryData;
 
     let query_data = DynQueryData::from_data_file(file, &input.src)?;
@@ -223,11 +233,9 @@ where
 
     if let Some(num) = num_parameters {
         if num != input.arg_exprs.len() {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                format!("expected {} parameters, got {}", num, input.arg_exprs.len()),
-            )
-            .into());
+            return Err(
+                format!("expected {} parameters, got {}", num, input.arg_exprs.len()).into(),
+            );
         }
     }
 
@@ -245,13 +253,13 @@ where
         let sql = &input.src;
 
         quote! {
-            sqlx::query_with::<#db_path, _>(#sql, #query_args)
+            ::sqlx::query_with::<#db_path, _>(#sql, #query_args)
         }
     } else {
-        let columns = output::columns_to_rust::<DB>(&data.describe)?;
-
-        let (out_ty, mut record_tokens) = match input.record_type {
+        match input.record_type {
             RecordType::Generated => {
+                let columns = output::columns_to_rust::<DB>(&data.describe)?;
+
                 let record_name: Type = syn::parse_str("Record").unwrap();
 
                 for rust_col in &columns {
@@ -270,33 +278,38 @@ where
                      }| quote!(#ident: #type_,),
                 );
 
-                let record_tokens = quote! {
+                let mut record_tokens = quote! {
                     #[derive(Debug)]
                     struct #record_name {
                         #(#record_fields)*
                     }
                 };
 
-                (Cow::Owned(record_name), record_tokens)
+                record_tokens.extend(output::quote_query_as::<DB>(
+                    &input,
+                    &record_name,
+                    &query_args,
+                    &columns,
+                ));
+
+                record_tokens
             }
-            RecordType::Given(ref out_ty) => (Cow::Borrowed(out_ty), quote!()),
-        };
+            RecordType::Given(ref out_ty) => {
+                let columns = output::columns_to_rust::<DB>(&data.describe)?;
 
-        record_tokens.extend(output::quote_query_as::<DB>(
-            &input,
-            &out_ty,
-            &query_args,
-            &columns,
-        ));
-
-        record_tokens
+                output::quote_query_as::<DB>(&input, out_ty, &query_args, &columns)
+            }
+            RecordType::Scalar => {
+                output::quote_query_scalar::<DB>(&input, &query_args, &data.describe)?
+            }
+        }
     };
 
     let ret_tokens = quote! {
         {
             #[allow(clippy::all)]
             {
-                use sqlx::Arguments as _;
+                use ::sqlx::Arguments as _;
 
                 #args_tokens
 
@@ -309,9 +322,8 @@ where
     // If the build is offline, the cache is our input so it's pointless to also write data for it.
     #[cfg(feature = "offline")]
     if !offline {
-        let mut save_dir = std::path::PathBuf::from(
-            env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target/".into()),
-        );
+        let mut save_dir =
+            PathBuf::from(env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target/".into()));
 
         save_dir.push("sqlx");
 

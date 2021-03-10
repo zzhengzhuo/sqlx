@@ -34,7 +34,7 @@ impl ToTokens for ColumnType {
         tokens.append_all(match &self {
             ColumnType::Exact(type_) => type_.clone().into_iter(),
             ColumnType::Wildcard => quote! { _ }.into_iter(),
-            ColumnType::OptWildcard => quote! { Option<_> }.into_iter(),
+            ColumnType::OptWildcard => quote! { ::std::option::Option<_> }.into_iter(),
         })
     }
 }
@@ -75,49 +75,48 @@ impl Display for DisplayColumn<'_> {
 }
 
 pub fn columns_to_rust<DB: DatabaseExt>(describe: &Describe<DB>) -> crate::Result<Vec<RustColumn>> {
-    describe
-        .columns()
-        .iter()
-        .enumerate()
-        .map(|(i, column)| -> crate::Result<_> {
-            // add raw prefix to all identifiers
-            let decl = ColumnDecl::parse(&column.name())
-                .map_err(|e| format!("column name {:?} is invalid: {}", column.name(), e))?;
-
-            let ColumnOverride { nullability, type_ } = decl.r#override;
-
-            let nullable = match nullability {
-                ColumnNullabilityOverride::NonNull => false,
-                ColumnNullabilityOverride::Nullable => true,
-                ColumnNullabilityOverride::None => describe.nullable(i).unwrap_or(true),
-            };
-            let type_ = match (type_, nullable) {
-                (ColumnTypeOverride::Exact(type_), false) => {
-                    ColumnType::Exact(type_.to_token_stream())
-                }
-                (ColumnTypeOverride::Exact(type_), true) => {
-                    ColumnType::Exact(quote! { Option<#type_> })
-                }
-
-                (ColumnTypeOverride::Wildcard, false) => ColumnType::Wildcard,
-                (ColumnTypeOverride::Wildcard, true) => ColumnType::OptWildcard,
-
-                (ColumnTypeOverride::None, _) => {
-                    let type_ = get_column_type::<DB>(i, column);
-                    if !nullable {
-                        ColumnType::Exact(type_)
-                    } else {
-                        ColumnType::Exact(quote! { Option<#type_> })
-                    }
-                }
-            };
-
-            Ok(RustColumn {
-                ident: decl.ident,
-                type_,
-            })
-        })
+    (0..describe.columns().len())
+        .map(|i| column_to_rust(describe, i))
         .collect::<crate::Result<Vec<_>>>()
+}
+
+fn column_to_rust<DB: DatabaseExt>(describe: &Describe<DB>, i: usize) -> crate::Result<RustColumn> {
+    let column = &describe.columns()[i];
+
+    // add raw prefix to all identifiers
+    let decl = ColumnDecl::parse(&column.name())
+        .map_err(|e| format!("column name {:?} is invalid: {}", column.name(), e))?;
+
+    let ColumnOverride { nullability, type_ } = decl.r#override;
+
+    let nullable = match nullability {
+        ColumnNullabilityOverride::NonNull => false,
+        ColumnNullabilityOverride::Nullable => true,
+        ColumnNullabilityOverride::None => describe.nullable(i).unwrap_or(true),
+    };
+    let type_ = match (type_, nullable) {
+        (ColumnTypeOverride::Exact(type_), false) => ColumnType::Exact(type_.to_token_stream()),
+        (ColumnTypeOverride::Exact(type_), true) => {
+            ColumnType::Exact(quote! { ::std::option::Option<#type_> })
+        }
+
+        (ColumnTypeOverride::Wildcard, false) => ColumnType::Wildcard,
+        (ColumnTypeOverride::Wildcard, true) => ColumnType::OptWildcard,
+
+        (ColumnTypeOverride::None, _) => {
+            let type_ = get_column_type::<DB>(i, column);
+            if !nullable {
+                ColumnType::Exact(type_)
+            } else {
+                ColumnType::Exact(quote! { ::std::option::Option<#type_> })
+            }
+        }
+    };
+
+    Ok(RustColumn {
+        ident: decl.ident,
+        type_,
+    })
 }
 
 pub fn quote_query_as<DB: DatabaseExt>(
@@ -146,7 +145,7 @@ pub fn quote_query_as<DB: DatabaseExt>(
                 // type was overridden to be a wildcard so we fallback to the runtime check
                 (true, ColumnType::Wildcard) => quote! ( let #ident = row.try_get(#i)?; ),
                 (true, ColumnType::OptWildcard) => {
-                    quote! ( let #ident = row.try_get::<Option<_>, _>(#i)?; )
+                    quote! ( let #ident = row.try_get::<::std::option::Option<_>, _>(#i)?; )
                 }
                 // macro is the `_unchecked!()` variant so this will die in decoding if it's wrong
                 (false, _) => quote!( let #ident = row.try_get_unchecked(#i)?; ),
@@ -161,14 +160,51 @@ pub fn quote_query_as<DB: DatabaseExt>(
     let sql = &input.src;
 
     quote! {
-        sqlx::query_with::<#db_path, _>(#sql, #bind_args).try_map(|row: #row_path| {
-            use sqlx::Row as _;
+        ::sqlx::query_with::<#db_path, _>(#sql, #bind_args).try_map(|row: #row_path| {
+            use ::sqlx::Row as _;
 
             #(#instantiations)*
 
             Ok(#out_ty { #(#ident: #ident),* })
         })
     }
+}
+
+pub fn quote_query_scalar<DB: DatabaseExt>(
+    input: &QueryMacroInput,
+    bind_args: &Ident,
+    describe: &Describe<DB>,
+) -> crate::Result<TokenStream> {
+    let columns = describe.columns();
+
+    if columns.len() != 1 {
+        return Err(syn::Error::new(
+            input.src_span,
+            format!("expected exactly 1 column, got {}", columns.len()),
+        )
+        .into());
+    }
+
+    // attempt to parse a column override, otherwise fall back to the inferred type of the column
+    let ty = if let Ok(rust_col) = column_to_rust(describe, 0) {
+        rust_col.type_.to_token_stream()
+    } else if input.checked {
+        let ty = get_column_type::<DB>(0, &columns[0]);
+        if describe.nullable(0).unwrap_or(true) {
+            quote! { ::std::option::Option<#ty> }
+        } else {
+            ty
+        }
+    } else {
+        quote! { _ }
+    };
+
+    let db = DB::db_path();
+    let query = &input.src;
+
+    Ok(quote! {
+        ::sqlx::query_scalar_with::<#db, #ty, _>(#query, #bind_args)
+    })
 }
 
 fn get_column_type<DB: DatabaseExt>(i: usize, column: &DB::Column) -> TokenStream {
@@ -268,7 +304,9 @@ fn parse_ident(name: &str) -> crate::Result<Ident> {
     // workaround for the following issue (it's semi-fixed but still spits out extra diagnostics)
     // https://github.com/dtolnay/syn/issues/749#issuecomment-575451318
 
-    let is_valid_ident = name.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let is_valid_ident = !name.is_empty()
+        && name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_');
 
     if is_valid_ident {
         let ident = String::from("r#") + name;
