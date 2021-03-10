@@ -1,6 +1,8 @@
-use proc_macro2::Ident;
-use syn::punctuated::Punctuated;
+use proc_macro2::{Ident, Span, TokenStream};
+use quote::{quote, quote_spanned};
+use syn::spanned::Spanned;
 use syn::token::Comma;
+use syn::{punctuated::Punctuated, ExprPath};
 use syn::{Attribute, DeriveInput, Field, Lit, Meta, MetaNameValue, NestedMeta, Variant};
 
 macro_rules! assert_attribute {
@@ -26,6 +28,27 @@ macro_rules! try_set {
     };
 }
 
+pub struct TypeName {
+    pub val: String,
+    pub span: Span,
+    /// Whether the old sqlx(rename) syntax was used instead of sqlx(type_name)
+    pub deprecated_rename: bool,
+}
+
+impl TypeName {
+    pub fn get(&self) -> TokenStream {
+        let val = &self.val;
+        if self.deprecated_rename {
+            quote_spanned!(self.span=> {
+                ::sqlx::_rename();
+                #val
+            })
+        } else {
+            quote! { #val }
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 pub enum RenameAll {
     LowerCase,
@@ -39,7 +62,7 @@ pub enum RenameAll {
 
 pub struct SqlxContainerAttributes {
     pub transparent: bool,
-    pub rename: Option<String>,
+    pub type_name: Option<TypeName>,
     pub rename_all: Option<RenameAll>,
     pub repr: Option<Ident>,
 }
@@ -47,15 +70,19 @@ pub struct SqlxContainerAttributes {
 pub struct SqlxChildAttributes {
     pub rename: Option<String>,
     pub default: bool,
+    pub try_from: Option<ExprPath>,
 }
 
 pub fn parse_container_attributes(input: &[Attribute]) -> syn::Result<SqlxContainerAttributes> {
     let mut transparent = None;
     let mut repr = None;
-    let mut rename = None;
+    let mut type_name = None;
     let mut rename_all = None;
 
-    for attr in input {
+    for attr in input
+        .iter()
+        .filter(|a| a.path.is_ident("sqlx") || a.path.is_ident("repr"))
+    {
         let meta = attr
             .parse_meta()
             .map_err(|e| syn::Error::new_spanned(attr, e))?;
@@ -91,7 +118,33 @@ pub fn parse_container_attributes(input: &[Attribute]) -> syn::Result<SqlxContai
                                 path,
                                 lit: Lit::Str(val),
                                 ..
-                            }) if path.is_ident("rename") => try_set!(rename, val.value(), value),
+                            }) if path.is_ident("type_name") => {
+                                try_set!(
+                                    type_name,
+                                    TypeName {
+                                        val: val.value(),
+                                        span: value.span(),
+                                        deprecated_rename: false
+                                    },
+                                    value
+                                )
+                            }
+
+                            Meta::NameValue(MetaNameValue {
+                                path,
+                                lit: Lit::Str(val),
+                                ..
+                            }) if path.is_ident("rename") => {
+                                try_set!(
+                                    type_name,
+                                    TypeName {
+                                        val: val.value(),
+                                        span: value.span(),
+                                        deprecated_rename: true
+                                    },
+                                    value
+                                )
+                            }
 
                             u => fail!(u, "unexpected attribute"),
                         },
@@ -117,7 +170,7 @@ pub fn parse_container_attributes(input: &[Attribute]) -> syn::Result<SqlxContai
     Ok(SqlxContainerAttributes {
         transparent: transparent.unwrap_or(false),
         repr,
-        rename,
+        type_name,
         rename_all,
     })
 }
@@ -125,6 +178,7 @@ pub fn parse_container_attributes(input: &[Attribute]) -> syn::Result<SqlxContai
 pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttributes> {
     let mut rename = None;
     let mut default = false;
+    let mut try_from = None;
 
     for attr in input.iter().filter(|a| a.path.is_ident("sqlx")) {
         let meta = attr
@@ -140,6 +194,11 @@ pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttri
                             lit: Lit::Str(val),
                             ..
                         }) if path.is_ident("rename") => try_set!(rename, val.value(), value),
+                        Meta::NameValue(MetaNameValue {
+                            path,
+                            lit: Lit::Str(val),
+                            ..
+                        }) if path.is_ident("try_from") => try_set!(try_from, val.parse()?, value),
                         Meta::Path(path) if path.is_ident("default") => default = true,
                         u => fail!(u, "unexpected attribute"),
                     },
@@ -149,7 +208,11 @@ pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttri
         }
     }
 
-    Ok(SqlxChildAttributes { rename, default })
+    Ok(SqlxChildAttributes {
+        rename,
+        default,
+        try_from,
+    })
 }
 
 pub fn check_transparent_attributes(
