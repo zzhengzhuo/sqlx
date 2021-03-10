@@ -1,8 +1,9 @@
-use proc_macro2::Span;
+use super::attributes::SqlxChildAttributes;
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use syn::{
-    parse_quote, punctuated::Punctuated, token::Comma, Data, DataStruct, DeriveInput, Field,
-    Fields, FieldsNamed, FieldsUnnamed, Lifetime, Stmt,
+    parse_quote, punctuated::Punctuated, token::Comma, Data, DataStruct, DeriveInput, ExprPath,
+    Field, Fields, FieldsNamed, FieldsUnnamed, Lifetime, LitStr,
 };
 
 use super::{
@@ -10,7 +11,7 @@ use super::{
     rename_all,
 };
 
-pub fn expand_derive_from_row(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+pub fn expand_derive_from_row(input: &DeriveInput) -> syn::Result<TokenStream> {
     match &input.data {
         Data::Struct(DataStruct {
             fields: Fields::Named(FieldsNamed { named, .. }),
@@ -39,7 +40,7 @@ pub fn expand_derive_from_row(input: &DeriveInput) -> syn::Result<proc_macro2::T
 fn expand_derive_from_row_struct(
     input: &DeriveInput,
     fields: &Punctuated<Field, Comma>,
-) -> syn::Result<proc_macro2::TokenStream> {
+) -> syn::Result<TokenStream> {
     let ident = &input.ident;
 
     let generics = &input.generics;
@@ -53,7 +54,7 @@ fn expand_derive_from_row_struct(
     let (_, ty_generics, _) = generics.split_for_impl();
 
     let mut generics = generics.clone();
-    generics.params.insert(0, parse_quote!(R: sqlx::Row));
+    generics.params.insert(0, parse_quote!(R));
 
     if provided {
         generics.params.insert(0, parse_quote!(#lifetime));
@@ -61,68 +62,127 @@ fn expand_derive_from_row_struct(
 
     let predicates = &mut generics.make_where_clause().predicates;
 
-    predicates.push(parse_quote!(&#lifetime str: sqlx::ColumnIndex<R>));
+    predicates.push(parse_quote!(&#lifetime ::std::primitive::str: ::sqlx::ColumnIndex<R>));
 
-    for field in fields {
+    let row_fields = get_row_fields(&fields)?;
+    for field in row_fields.iter() {
         let ty = &field.ty;
 
-        predicates.push(parse_quote!(#ty: sqlx::decode::Decode<#lifetime, R::Database>));
-        predicates.push(parse_quote!(#ty: sqlx::types::Type<R::Database>));
+        if field.attrs.try_from.is_none() {
+            predicates.push(parse_quote!(#ty: ::sqlx::decode::Decode<#lifetime, R::Database>));
+            predicates.push(parse_quote!(#ty: ::sqlx::types::Type<R::Database>));
+        }
     }
 
     let (impl_generics, _, where_clause) = generics.split_for_impl();
 
     let container_attributes = parse_container_attributes(&input.attrs)?;
 
-    let reads = fields.iter().filter_map(|field| -> Option<Stmt> {
-        let id = &field.ident.as_ref()?;
-        let attributes = parse_child_attributes(&field.attrs).unwrap();
-        let id_s = attributes
-            .rename
-            .or_else(|| Some(id.to_string().trim_start_matches("r#").to_owned()))
-            .map(|s| match container_attributes.rename_all {
-                Some(pattern) => rename_all(&s, pattern),
-                None => s,
-            })
-            .unwrap();
-
-        let ty = &field.ty;
-
-        if attributes.default {
-            Some(
-                parse_quote!(let #id: #ty = row.try_get(#id_s).or_else(|e| match e {
-                sqlx::Error::ColumnNotFound(_) => {
-                    Ok(Default::default())
-                },
-                e => Err(e)
-            })?;),
-            )
-        } else {
-            Some(parse_quote!(
-                let #id: #ty = row.try_get(#id_s)?;
-            ))
-        }
-    });
-
-    let names = fields.iter().map(|field| &field.ident);
-
-    Ok(quote!(
-        impl #impl_generics sqlx::FromRow<#lifetime, R> for #ident #ty_generics #where_clause {
-            fn from_row(row: &#lifetime R) -> sqlx::Result<Self> {
-                #(#reads)*
-
-                Ok(#ident {
-                    #(#names),*
+    let reads = row_fields
+        .iter()
+        .filter_map(|field| -> Option<TokenStream> {
+            let id = field.ident.as_ref()?;
+            let attributes = &field.attrs;
+            let ty = &field.ty;
+            let id_s = attributes
+                .rename
+                .clone()
+                .or_else(|| Some(id.to_string().trim_start_matches("r#").to_owned()))
+                .map(|s| match container_attributes.rename_all {
+                    Some(pattern) => rename_all(&s, pattern),
+                    None => s,
                 })
+                .unwrap();
+
+            let row_block = quote! {
+                let row_res = row.try_get(#id_s);
+            };
+
+            let with_block = match &attributes.try_from {
+                Some(path) => {
+                    quote! {
+                        let id_val = #path(row).map_err(|source| ::sqlx::Error::ColumnDecode {
+                            index: #id_s.to_owned(),
+                            source:source.into(),
+                        })?;
+                    }
+                }
+                None => {
+                    quote! {
+                        let id_val = row;
+                    }
+                }
+            };
+
+            let body_block = if attributes.default {
+                quote! {
+                    let id_val:#ty = match row_res{
+                        Err(::sqlx::Error::ColumnNotFound(_)) => Default::default(),
+                        row_res => {
+                            let row = row_res?;
+                            #with_block
+                            id_val
+                        }
+                    };
+                }
+            } else {
+                quote! {
+                    let row = row_res?;
+                    #with_block
+                }
+            };
+
+            Some(quote! {
+                let #id = {
+                    #row_block
+                    #body_block
+                    id_val
+                };
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let names = fields.iter().map(|field| &field.ident).collect::<Vec<_>>();
+
+    let mut block = TokenStream::new();
+
+    let mut extend_block = |exprpath: ExprPath| {
+        block.extend(quote!(
+            #[automatically_derived]
+            impl #impl_generics ::sqlx::FromRow<#lifetime, R> for #ident #ty_generics #where_clause,R: ::sqlx::Row<Database = #exprpath>, {
+                fn from_row(row: &#lifetime R) -> ::sqlx::Result<Self> {
+                    #(#reads)*
+                    ::std::result::Result::Ok(#ident {
+                        #(#names),*
+                    })
+                }
             }
-        }
-    ))
+        ));
+    };
+
+    if cfg!(feature = "mysql") {
+        extend_block(LitStr::new("::sqlx::MySql", Span::call_site()).parse()?);
+    }
+    if cfg!(feature = "postgres") {
+        extend_block(LitStr::new("::sqlx::Postgres", Span::call_site()).parse()?);
+    }
+    if cfg!(feature = "sqlite") {
+        extend_block(LitStr::new("::sqlx::Sqlite", Span::call_site()).parse()?);
+    }
+    if cfg!(feature = "mssql") {
+        extend_block(LitStr::new("::sqlx::Mssql", Span::call_site()).parse()?);
+    }
+    if cfg!(feature = "any") {
+        extend_block(LitStr::new("::sqlx::Any", Span::call_site()).parse()?);
+    }
+
+    Ok(block)
 }
 
 fn expand_derive_from_row_struct_unnamed(
     input: &DeriveInput,
     fields: &Punctuated<Field, Comma>,
-) -> syn::Result<proc_macro2::TokenStream> {
+) -> syn::Result<TokenStream> {
     let ident = &input.ident;
 
     let generics = &input.generics;
@@ -136,7 +196,7 @@ fn expand_derive_from_row_struct_unnamed(
     let (_, ty_generics, _) = generics.split_for_impl();
 
     let mut generics = generics.clone();
-    generics.params.insert(0, parse_quote!(R: sqlx::Row));
+    generics.params.insert(0, parse_quote!(R: ::sqlx::Row));
 
     if provided {
         generics.params.insert(0, parse_quote!(#lifetime));
@@ -144,13 +204,15 @@ fn expand_derive_from_row_struct_unnamed(
 
     let predicates = &mut generics.make_where_clause().predicates;
 
-    predicates.push(parse_quote!(usize: sqlx::ColumnIndex<R>));
+    predicates.push(parse_quote!(
+        ::std::primitive::usize: ::sqlx::ColumnIndex<R>
+    ));
 
     for field in fields {
         let ty = &field.ty;
 
-        predicates.push(parse_quote!(#ty: sqlx::decode::Decode<#lifetime, R::Database>));
-        predicates.push(parse_quote!(#ty: sqlx::types::Type<R::Database>));
+        predicates.push(parse_quote!(#ty: ::sqlx::decode::Decode<#lifetime, R::Database>));
+        predicates.push(parse_quote!(#ty: ::sqlx::types::Type<R::Database>));
     }
 
     let (impl_generics, _, where_clause) = generics.split_for_impl();
@@ -161,12 +223,35 @@ fn expand_derive_from_row_struct_unnamed(
         .map(|(idx, _)| quote!(row.try_get(#idx)?));
 
     Ok(quote!(
-        impl #impl_generics sqlx::FromRow<#lifetime, R> for #ident #ty_generics #where_clause {
-            fn from_row(row: &#lifetime R) -> sqlx::Result<Self> {
-                Ok(#ident (
+        #[automatically_derived]
+        impl #impl_generics ::sqlx::FromRow<#lifetime, R> for #ident #ty_generics #where_clause {
+            fn from_row(row: &#lifetime R) -> ::sqlx::Result<Self> {
+                ::std::result::Result::Ok(#ident (
                     #(#gets),*
                 ))
             }
         }
     ))
+}
+
+struct RowField<'a> {
+    attrs: SqlxChildAttributes,
+    ident: &'a Option<Ident>,
+    ty: &'a syn::Type,
+}
+
+fn get_row_fields<'a>(
+    fields: &'a Punctuated<syn::Field, syn::Token![,]>,
+) -> Result<Vec<RowField<'a>>, syn::Error> {
+    fields
+        .iter()
+        .enumerate()
+        .map(|(_, field)| {
+            Ok(RowField {
+                ident: &field.ident,
+                attrs: parse_child_attributes(&field.attrs)?,
+                ty: &field.ty,
+            })
+        })
+        .collect()
 }
