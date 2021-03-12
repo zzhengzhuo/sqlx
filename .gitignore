@@ -11,4 +11,3 @@ target/
 .env
 
 .history
-Cargo.lock
