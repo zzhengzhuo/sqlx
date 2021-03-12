@@ -1,7 +1,7 @@
 use proc_macro2::Ident;
 use syn::punctuated::Punctuated;
 use syn::token::Comma;
-use syn::{Attribute, DeriveInput, Field, Lit, Meta, MetaNameValue, NestedMeta, Variant};
+use syn::{Attribute, DeriveInput, Field, Lit, Meta, MetaNameValue, NestedMeta, Variant,ExprPath};
 
 macro_rules! assert_attribute {
     ($e:expr, $err:expr, $input:expr) => {
@@ -47,6 +47,7 @@ pub struct SqlxContainerAttributes {
 pub struct SqlxChildAttributes {
     pub rename: Option<String>,
     pub default: bool,
+    pub try_from: Option<ExprPath>,
 }
 
 pub fn parse_container_attributes(input: &[Attribute]) -> syn::Result<SqlxContainerAttributes> {
@@ -86,6 +87,7 @@ pub fn parse_container_attributes(input: &[Attribute]) -> syn::Result<SqlxContai
 
                                 try_set!(rename_all, val, value)
                             }
+                            
 
                             Meta::NameValue(MetaNameValue {
                                 path,
@@ -125,6 +127,7 @@ pub fn parse_container_attributes(input: &[Attribute]) -> syn::Result<SqlxContai
 pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttributes> {
     let mut rename = None;
     let mut default = false;
+    let mut try_from = None;
 
     for attr in input.iter().filter(|a| a.path.is_ident("sqlx")) {
         let meta = attr
@@ -140,6 +143,11 @@ pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttri
                             lit: Lit::Str(val),
                             ..
                         }) if path.is_ident("rename") => try_set!(rename, val.value(), value),
+                        Meta::NameValue(MetaNameValue {
+                            path,
+                            lit: Lit::Str(val),
+                            ..
+                        }) if path.is_ident("try_from") => try_set!(try_from, val.parse()?, value),
                         Meta::Path(path) if path.is_ident("default") => default = true,
                         u => fail!(u, "unexpected attribute"),
                     },
@@ -149,7 +157,7 @@ pub fn parse_child_attributes(input: &[Attribute]) -> syn::Result<SqlxChildAttri
         }
     }
 
-    Ok(SqlxChildAttributes { rename, default })
+    Ok(SqlxChildAttributes { rename, default,try_from })
 }
 
 pub fn check_transparent_attributes(
