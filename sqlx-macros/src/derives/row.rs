@@ -118,7 +118,11 @@ fn expand_derive_from_row_struct(
                     let id_val:#ty = match row_res{
                         Err(::sqlx::Error::ColumnNotFound(_)) => Default::default(),
                         row_res => {
-                            let row = row_res?;
+                            let row:Option<_> = row_res?;
+                            let row = match row{
+                                Some(row) => row,
+                                None => Default::default(),
+                            };
                             #with_block
                             id_val
                         }
