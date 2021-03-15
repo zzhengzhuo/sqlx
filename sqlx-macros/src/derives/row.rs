@@ -132,7 +132,7 @@ fn expand_derive_from_row_struct(
                 quote! {
                     let row = row_res?.ok_or(::sqlx::Error::ColumnDecode{
                         index: #id_s.to_owned(),
-                        source: Box::new(format!("error occurred while decoding column \"{}\": unexpected null; try decoding as an `Option`",#id_s))
+                        source: Box::new(::sqlx_core::error::UnexpectedNullError)
                     })?;
                     #with_block
                 }
