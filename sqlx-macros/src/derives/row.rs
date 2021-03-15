@@ -10,6 +10,10 @@ use super::{
     rename_all,
 };
 
+#[derive(thiserror::Error, Debug)]
+#[error("unexpected null; try decoding as an `Option`")]
+pub struct UnexpectedNullError;
+
 pub fn expand_derive_from_row(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     match &input.data {
         Data::Struct(DataStruct {
@@ -132,7 +136,7 @@ fn expand_derive_from_row_struct(
                 quote! {
                     let row = row_res?.ok_or(::sqlx::Error::ColumnDecode{
                         index: #id_s.to_owned(),
-                        source: Box::new(::sqlx_core::error::UnexpectedNullError)
+                        source: Box::new(::sqlx::error::UnexpectedNullError)
                     })?;
                     #with_block
                 }
