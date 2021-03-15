@@ -10,10 +10,6 @@ use super::{
     rename_all,
 };
 
-#[derive(thiserror::Error, Debug)]
-#[error("unexpected null; try decoding as an `Option`")]
-pub struct UnexpectedNullError;
-
 pub fn expand_derive_from_row(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     match &input.data {
         Data::Struct(DataStruct {
