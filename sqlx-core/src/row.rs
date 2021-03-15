@@ -132,6 +132,14 @@ pub trait Row: private_row::Sealed + Unpin + Send + Sync + 'static {
         })
     }
 
+    fn try_get_opt<'r, T, I>(&'r self, index: I) -> Result<Option<T>, Error>
+    where
+        I: ColumnIndex<Self>,
+        T: Decode<'r, Self::Database> + Type<Self::Database>,
+    {
+        try_get(self,index)
+    }
+
     /// Index into the database row and decode a single value.
     ///
     /// Unlike [`try_get`](#method.try_get), this method does not check that the type

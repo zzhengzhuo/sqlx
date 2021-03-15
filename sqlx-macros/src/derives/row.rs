@@ -94,7 +94,7 @@ fn expand_derive_from_row_struct(
                 .unwrap();
 
             let row_block = quote! {
-                let row_res = row.try_get(#id_s);
+                let row_res = row.try_get_opt(#id_s);
             };
 
             let with_block = match &attributes.try_from {
@@ -118,7 +118,7 @@ fn expand_derive_from_row_struct(
                     let id_val:#ty = match row_res{
                         Err(::sqlx::Error::ColumnNotFound(_)) => Default::default(),
                         row_res => {
-                            let row:Option<_> = row_res?;
+                            let row = row_res?;
                             let row = match row{
                                 Some(row) => row,
                                 None => Default::default(),
@@ -130,7 +130,10 @@ fn expand_derive_from_row_struct(
                 }
             } else {
                 quote! {
-                    let row = row_res?;
+                    let row = row_res?.ok_or(::sqlx::Error::ColumnDecode{
+                        index: #id_s.to_owned(),
+                        source: Box<format!("error occurred while decoding column \"{}\": unexpected null; try decoding as an `Option`",#id_s)>
+                    });
                     #with_block
                 }
             };
