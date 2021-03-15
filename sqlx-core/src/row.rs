@@ -137,7 +137,7 @@ pub trait Row: private_row::Sealed + Unpin + Send + Sync + 'static {
         I: ColumnIndex<Self>,
         T: Decode<'r, Self::Database> + Type<Self::Database>,
     {
-        try_get(self,index)
+        self.try_get(index)
     }
 
     /// Index into the database row and decode a single value.
