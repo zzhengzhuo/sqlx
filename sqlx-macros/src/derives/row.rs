@@ -135,7 +135,6 @@ fn expand_derive_from_row_struct(
 
             Some(quote! {
                 let #id = {
-                    #row_block
                     #body_block
                     id_val
                 };
