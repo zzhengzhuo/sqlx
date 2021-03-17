@@ -132,6 +132,13 @@ pub trait Row: private_row::Sealed + Unpin + Send + Sync + 'static {
         })
     }
 
+    fn try_get_opt<'r, T, I>(&'r self, index: I) -> Result<Option<T>, Error>
+    where
+        I: ColumnIndex<Self>,
+        T: Decode<'r, Self::Database> + Type<Self::Database>,
+    {
+        self.try_get(index)
+    }
 
     /// Index into the database row and decode a single value.
     ///
