@@ -157,7 +157,7 @@ pub trait Row: private_row::Sealed + Unpin + Send + Sync + 'static {
         Some(T::decode(value).map_err(|source| Error::ColumnDecode {
             index: format!("{:?}", index),
             source,
-        }))
+        })?)
     }
 
     /// Index into the database row and decode a single value.
