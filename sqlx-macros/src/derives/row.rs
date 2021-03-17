@@ -93,10 +93,6 @@ fn expand_derive_from_row_struct(
                 })
                 .unwrap();
 
-            let row_block = quote! {
-                let row_res = row.try_get_opt(#id_s);
-            };
-
             let with_block = match &attributes.try_from {
                 Some(path) => {
                     quote! {
@@ -115,6 +111,7 @@ fn expand_derive_from_row_struct(
 
             let body_block = if attributes.default {
                 quote! {
+                    let row_res:Option<#ty> = row.try_get(#id_s);
                     let id_val:#ty = match row_res{
                         Err(::sqlx::Error::ColumnNotFound(_)) => Default::default(),
                         row_res => {
@@ -130,10 +127,8 @@ fn expand_derive_from_row_struct(
                 }
             } else {
                 quote! {
-                    let row = row_res?.ok_or(::sqlx::Error::ColumnDecode{
-                        index: #id_s.to_owned(),
-                        source: Box::new(::sqlx::error::UnexpectedNullError)
-                    })?;
+                    let row_res = row.try_get(#id_s);
+                    let row = row_res?;
                     #with_block
                 }
             };

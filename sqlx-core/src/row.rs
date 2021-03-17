@@ -132,33 +132,6 @@ pub trait Row: private_row::Sealed + Unpin + Send + Sync + 'static {
         })
     }
 
-    fn try_get_opt<'r, T, I>(&'r self, index: I) -> Result<Option<T>, Error>
-    where
-        I: ColumnIndex<Self>,
-        T: Decode<'r, Self::Database> + Type<Self::Database>,
-    {
-        let value = self.try_get_raw(&index)?;
-
-        if !value.is_null() {
-            let ty = value.type_info();
-
-            if !ty.is_null() && !T::compatible(&ty) {
-                return Err(Error::ColumnDecode {
-                    index: format!("{:?}", index),
-                    source: mismatched_types::<Self::Database, T>(&ty),
-                });
-            }
-        }
-
-        if value.is_null(){
-            return Ok(None);
-        }
-
-        Ok(Some(T::decode(value).map_err(|source| Error::ColumnDecode {
-            index: format!("{:?}", index),
-            source,
-        })?))
-    }
 
     /// Index into the database row and decode a single value.
     ///
