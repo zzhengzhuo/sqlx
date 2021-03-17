@@ -151,7 +151,7 @@ pub trait Row: private_row::Sealed + Unpin + Send + Sync + 'static {
         }
 
         if value.is_null(){
-            return None;
+            return Ok(None);
         }
 
         Ok(Some(T::decode(value).map_err(|source| Error::ColumnDecode {
