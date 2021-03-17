@@ -127,7 +127,7 @@ fn expand_derive_from_row_struct(
                 }
             } else {
                 quote! {
-                    let row_res = row.try_get(#id_s)?;
+                    let row_res = row.try_get(#id_s);
                     let row = row_res?;
                     #with_block
                 }
