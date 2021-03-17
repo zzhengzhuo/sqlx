@@ -130,10 +130,7 @@ fn expand_derive_from_row_struct(
                 }
             } else {
                 quote! {
-                    let row = row_res?.ok_or(::sqlx::Error::ColumnDecode{
-                        index: #id_s.to_owned(),
-                        source: Box::new(::sqlx::error::UnexpectedNullError)
-                    })?;
+                    let row = row_res?;
                     #with_block
                 }
             };
